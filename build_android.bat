@@ -1,76 +1,152 @@
 @echo off
 REM ==============================================
-REM OpenCV Android Build Script
+REM OpenCV Android build script (produce .so + export headers)
 REM ==============================================
 
-REM 修改以下路径为你本机的实际路径,安装了Android Studio之后JAVA_HOME的路径在：C:\Program Files\Android\Android Studio\jbr，需要自己配到环境变量中%JAVA_HOME%\bin
-set NDK_PATH=C:/Users/miles/AppData/Local/Android/Sdk/ndk/29.0.13846066
-set ANDROID_SDK_PATH=C:/Users/miles/AppData/Local/Android/Sdk
+setlocal EnableExtensions EnableDelayedExpansion
 
-REM 设置源码目录（OpenCV源码根目录，包含CMakeLists.txt的目录）
-set SRC_DIR=%~dp0
-REM 移除路径末尾的斜杠
-set SRC_DIR=%SRC_DIR:~0,-1%
+REM Allow overriding via environment variables; auto-detect if not set
+if not defined ANDROID_SDK_PATH set ANDROID_SDK_PATH=%LOCALAPPDATA%/Android/Sdk
+if not defined JAVA_HOME set JAVA_HOME=C:/Program Files/Android/Android Studio/jbr
 
-REM 设置构建目录
-set BUILD_DIR=%SRC_DIR%\build_android
+REM Default NDK path (user-specific)
+if not defined NDK_PATH set "NDK_PATH=C:\Users\miles\AppData\Local\Android\Sdk\ndk\29.0.13846066"
+set "NDK_PATH=C:\Users\miles\AppData\Local\Android\Sdk\ndk\29.0.13846066"
 
-REM 如果目录已存在则删除
-if exist "%BUILD_DIR%" (
-    echo Removing old build directory...
-    rmdir /s /q "%BUILD_DIR%"
+
+REM Prefer ANDROID_NDK_HOME/ANDROID_NDK_ROOT/NDK_PATH; otherwise pick the newest NDK under SDK
+if not defined NDK_PATH (
+    if defined ANDROID_NDK_HOME (
+        set NDK_PATH=%ANDROID_NDK_HOME%/ndk/29.0.13846066
+    ) else if defined ANDROID_NDK_ROOT (
+        set NDK_PATH=%ANDROID_NDK_ROOT%/ndk/29.0.13846066
+    ) else (
+        if exist "%ANDROID_SDK_PATH%\ndk\29.0.13846066" (
+            set NDK_PATH=%ANDROID_SDK_PATH%\ndk\29.0.13846066
+        )
+    )
 )
 
-REM 创建新的 build 目录
+set SRC_DIR=%~dp0
+set SRC_DIR=%SRC_DIR:~0,-1%
+set BUILD_DIR=%SRC_DIR%\build_android
+set INSTALL_DIR=%SRC_DIR%\opencv_android_3rd
+
+REM Allow multiple ABIs via ANDROID_ABIS (space-separated), default to arm64-v8a
+if not defined ANDROID_ABIS set ANDROID_ABIS=arm64-v8a
+
+if exist "%BUILD_DIR%" (
+    echo [1/5] Cleaning previous build directory...
+    rmdir /s /q "%BUILD_DIR%"
+)
+if exist "%INSTALL_DIR%" (
+    echo [1/5] Cleaning previous install directory...
+    rmdir /s /q "%INSTALL_DIR%"
+)
 mkdir "%BUILD_DIR%"
 cd "%BUILD_DIR%" || (
-    echo 无法进入构建目录 %BUILD_DIR%
+    echo Error: Cannot enter build directory %BUILD_DIR%
     pause
     exit /b 1
 )
 
-REM 配置环境变量，让CMake能找到Android SDK
+echo [2/5] Setting up environment variables...
 set ANDROID_SDK_ROOT=%ANDROID_SDK_PATH%
 set ANDROID_HOME=%ANDROID_SDK_PATH%
+set PATH=%JAVA_HOME%\bin;%PATH%
 
-REM 配置 CMake
-cmake -G Ninja ^
- -DCMAKE_TOOLCHAIN_FILE="%NDK_PATH%/build/cmake/android.toolchain.cmake" ^
- -DANDROID_ABI=arm64-v8a ^
- -DANDROID_PLATFORM=android-27 ^
- -DCMAKE_BUILD_TYPE=Release ^
- -DBUILD_SHARED_LIBS=ON ^
- -DBUILD_TESTS=OFF ^
- -DBUILD_PERF_TESTS=OFF ^
- -DBUILD_EXAMPLES=OFF ^
- -DBUILD_ANDROID_PROJECTS=ON ^
- -DANDROID_SDK="%ANDROID_SDK_PATH%" ^
- "%SRC_DIR%"
-
-REM 检查CMake配置是否成功
+java -version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo CMake配置失败!
+    echo Error: Java not found. Please check JAVA_HOME!
     pause
-    exit /b %errorlevel%
+    exit /b 1
 )
 
-REM 编译（使用多线程加速）
-cmake --build . --config Release --parallel 8
-
-REM 检查编译是否成功
-if %errorlevel% equ 0 (
-    echo.
-    echo ==============================================
-    echo ✅ Build finished successfully!
-    echo 输出文件在: %BUILD_DIR%
-    echo so 库路径: %BUILD_DIR%/lib/arm64-v8a/
-    echo aar 文件路径: %BUILD_DIR%/sdk/android/lib/
-    echo ==============================================
-) else (
-    echo.
-    echo ==============================================
-    echo ❌ Build failed!
-    echo ==============================================
+echo NDK_PATH=%NDK_PATH%
+if not exist "%NDK_PATH%\build\cmake\android.toolchain.cmake" (
+    echo Error: Toolchain file not found:
+    echo   "%NDK_PATH%\build\cmake\android.toolchain.cmake"
+    echo Please set NDK_PATH or ANDROID_NDK_HOME to a valid NDK directory.
+    if not defined NONINTERACTIVE pause
+    exit /b 1
 )
 
-pause
+for %%A in (%ANDROID_ABIS%) do (
+    echo [3/5] Running CMake configure - ABI=%%A...
+    if not exist "%%A" mkdir "%%A"
+    cd "%%A" || (
+        echo Error: Cannot enter sub-build directory %BUILD_DIR%\%%A
+        exit /b 1
+    )
+
+    cmake -G Ninja ^
+     -DCMAKE_TOOLCHAIN_FILE="%NDK_PATH%/build/cmake/android.toolchain.cmake" ^
+     -DANDROID_ABI=%%A ^
+     -DANDROID_PLATFORM=android-27 ^
+     -DCMAKE_BUILD_TYPE=Release ^
+     -DBUILD_SHARED_LIBS=ON ^
+     -DBUILD_TESTS=OFF ^
+     -DBUILD_PERF_TESTS=OFF ^
+     -DBUILD_EXAMPLES=OFF ^
+     -DBUILD_ANDROID_PROJECTS=OFF ^
+     -DANDROID_SDK="%ANDROID_SDK_PATH%" ^
+     -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" ^
+     -DCMAKE_INSTALL_LIBDIR=lib/%%A ^
+     "%SRC_DIR%"
+
+    if errorlevel 1 (
+        echo Error: CMake configure failed - ABI=%%A! Please check paths or dependencies.
+        exit /b 1
+    )
+
+    echo [4/5] Building OpenCV - ABI=%%A, parallel...
+    cmake --build . --config Release --parallel 8
+
+    if errorlevel 1 (
+        echo Error: OpenCV build failed - ABI=%%A!
+        exit /b 1
+    )
+
+    echo [5/5] Installing export headers and .so - ABI=%%A...
+    cmake --build . --config Release --target install
+
+    if errorlevel 1 (
+        echo Error: Install/export failed - ABI=%%A!
+        exit /b 1
+    )
+
+    cd "%BUILD_DIR%"
+)
+
+echo [6/5] Preparing simplified install layout...
+if not exist "%INSTALL_DIR%\include\opencv2" (
+    mkdir "%INSTALL_DIR%\include\opencv2" 2>nul
+    xcopy /E /I /Y "%INSTALL_DIR%\sdk\native\jni\include\opencv2" "%INSTALL_DIR%\include\opencv2\" >nul
+)
+for %%A in (%ANDROID_ABIS%) do (
+    if not exist "%INSTALL_DIR%\lib\%%A" mkdir "%INSTALL_DIR%\lib\%%A" 2>nul
+    xcopy /Y "%INSTALL_DIR%\sdk\native\libs\%%A\*.so" "%INSTALL_DIR%\lib\%%A\" >nul
+)
+
+echo.
+echo ==============================================
+echo All ABIs built and installed successfully.
+echo Output directory: %INSTALL_DIR%
+echo --------------------------
+echo SDK layout:
+echo %INSTALL_DIR%\sdk\native\jni\include\opencv2\
+for %%A in (%ANDROID_ABIS%) do echo %INSTALL_DIR%\sdk\native\libs\%%A\
+echo Simplified layout:
+echo %INSTALL_DIR%\include\opencv2\
+for %%A in (%ANDROID_ABIS%) do echo %INSTALL_DIR%\lib\%%A\
+echo ==============================================
+echo Integrate into your A.so/JNI project:
+echo 1. Copy %INSTALL_DIR%\include\opencv2\ to 3rd\opencv\include\
+echo 2. Copy %INSTALL_DIR%\lib\[abi]\*.so to 3rd\opencv\lib\[abi]\
+echo 3. In CMakeLists.txt:
+echo    - include_directories(3rd/opencv/include)
+echo    - link_directories(3rd/opencv/lib/[abi])
+echo    - target_link_libraries(A.so opencv_core opencv_imgproc ...)
+echo ==============================================
+
+if not defined NONINTERACTIVE pause
